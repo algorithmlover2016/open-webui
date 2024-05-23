@@ -1,16 +1,28 @@
 general_settings: {}
-litellm_settings: {}
-router_settings: {}
+litellm_settings:
+  drop_params: true
+  set_verbose: false
 model_list:
-  - model_name: gpt-4-32k-litellm ### RECEIVED MODEL NAME ###
-    litellm_params: # all params accepted by litellm.completion() - https://docs.litellm.ai/docs/completion/input
-      model: azure/gpt-4-32k ### MODEL NAME sent to `litellm.completion()` ###
-      api_base: "os.environ/AZURE_API_BASE" # https://your-account-name.openai.azure.com/
-      api_key: "os.environ/AZURE_API_KEY" # does os.getenv("AZURE_API_KEY_EU")
-      api_version: "os.environ/AZURE_API_VERSION" # 2024-03-01-preview
-      rpm: 3000      # [OPTIONAL] Rate limit for this deployment: in requests per minute (rpm)
-litellm_settings: # module level litellm settings - https://github.com/BerriAI/litellm/blob/main/litellm/__init__.py
-  drop_params: True
-  set_verbose: False
+# - litellm_params: # all params accepted by litellm.completion() - https://docs.litellm.ai/docs/completion/input
+#     api_base: os.environ/AZURE_API_BASE # does os.getenv("AZURE_API_BASE")
+#     api_key: os.environ/AZURE_API_KEY # does os.getenv("AZURE_API_KEY")
+#     api_version: os.environ/AZURE_API_VERSION # does os.getenv("AZURE_API_VERSION")
+#     model: azure/gpt-4-32k ### MODEL NAME sent to `litellm.completion()` ###
+#     rpm: 3000 # [OPTIONAL] Rate limit for this deployment: in requests per minute (rpm)
+#   model_name: gpt-4-32k-litellm ### RECEIVED MODEL NAME ###
 
-general_settings: {}
+# - litellm_params:
+#     api_base: os.environ/AZURE_API_BASE_GPT35 # does os.getenv("AZURE_API_BASE_GPT35")
+#     api_key: os.environ/AZURE_API_KEY_GPT35  # does os.getenv("AZURE_API_KEY_GPT35")
+#     api_version: os.environ/AZURE_API_VERSION_GPT35 # does os.getenv("AZURE_API_VERSION_GPT35")
+#     model: azure/gpt-35 # deployment model name in azure
+#     rpm: 3000
+#   model_name: azure_openai_gpt35 ### RECEIVED MODEL NAME ###
+- litellm_params:
+    api_base: os.environ/AZURE_API_BASE_GPT4O # does os.getenv("AZURE_API_VERSION_GPT4O")
+    api_key: os.environ/AZURE_API_KEY_GPT4O  # does os.getenv("AZURE_API_VERSION_GPT4O")
+    api_version: os.environ/AZURE_API_VERSION_GPT4O # does os.getenv("AZURE_API_VERSION_GPT4O")
+    model: azure/gpt-4o # deployment model name in azure
+    rpm: 3000
+  model_name: azure_openai_gpt4o
+router_settings: {}
