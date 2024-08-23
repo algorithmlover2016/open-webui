@@ -1,11 +1,16 @@
 import os
 import sys
 import logging
+import importlib.metadata
+import pkgutil
+from urllib.parse import urlparse
+
 import chromadb
 from chromadb import Settings
-from base64 import b64encode
 from bs4 import BeautifulSoup
-from typing import TypeVar, Generic, Union
+from typing import TypeVar, Generic
+from pydantic import BaseModel
+from typing import Optional
 
 from pathlib import Path
 import json
@@ -15,17 +20,21 @@ import markdown
 import requests
 import shutil
 
-from secrets import token_bytes
 from constants import ERROR_MESSAGES
 
 ####################################
 # Load .env file
 ####################################
 
+BACKEND_DIR = Path(__file__).parent  # the path containing this file
+BASE_DIR = BACKEND_DIR.parent  # the path containing the backend/
+
+print(BASE_DIR)
+
 try:
     from dotenv import load_dotenv, find_dotenv
 
-    load_dotenv(find_dotenv("../.env"))
+    load_dotenv(find_dotenv(str(BASE_DIR / ".env")))
 except ImportError:
     print("dotenv not installed, skipping...")
 
@@ -51,7 +60,6 @@ log_sources = [
     "CONFIG",
     "DB",
     "IMAGES",
-    "LITELLM",
     "MAIN",
     "MODELS",
     "OLLAMA",
@@ -71,6 +79,16 @@ for source in log_sources:
 
 log.setLevel(SRC_LOG_LEVELS["CONFIG"])
 
+
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage().find("/health") == -1
+
+
+# Filter out /endpoint
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
+
 WEBUI_NAME = os.environ.get("WEBUI_NAME", "Open WebUI")
 if WEBUI_NAME != "Open WebUI":
     WEBUI_NAME += " (Open WebUI)"
@@ -87,10 +105,12 @@ WEBUI_FAVICON_URL = "https://openwebui.com/favicon.png"
 ENV = os.environ.get("ENV", "dev")
 
 try:
-    with open(f"../package.json", "r") as f:
-        PACKAGE_DATA = json.load(f)
-except:
-    PACKAGE_DATA = {"version": "0.0.0"}
+    PACKAGE_DATA = json.loads((BASE_DIR / "package.json").read_text())
+except Exception:
+    try:
+        PACKAGE_DATA = {"version": importlib.metadata.version("open-webui")}
+    except importlib.metadata.PackageNotFoundError:
+        PACKAGE_DATA = {"version": "0.0.0"}
 
 VERSION = PACKAGE_DATA["version"]
 
@@ -115,10 +135,13 @@ def parse_section(section):
 
 
 try:
-    with open("../CHANGELOG.md", "r") as file:
+    changelog_path = BASE_DIR / "CHANGELOG.md"
+    with open(str(changelog_path.absolute()), "r", encoding="utf8") as file:
         changelog_content = file.read()
-except:
-    changelog_content = ""
+
+except Exception:
+    changelog_content = (pkgutil.get_data("open_webui", "CHANGELOG.md") or b"").decode()
+
 
 # Convert markdown content to HTML
 html_content = markdown.markdown(changelog_content)
@@ -153,24 +176,39 @@ for version in soup.find_all("h2"):
 
 CHANGELOG = changelog_json
 
+####################################
+# SAFE_MODE
+####################################
+
+SAFE_MODE = os.environ.get("SAFE_MODE", "false").lower() == "true"
 
 ####################################
-# WEBUI_VERSION
+# WEBUI_BUILD_HASH
 ####################################
 
-WEBUI_VERSION = os.environ.get("WEBUI_VERSION", "v1.0.0-alpha.100")
+WEBUI_BUILD_HASH = os.environ.get("WEBUI_BUILD_HASH", "dev-build")
 
 ####################################
 # DATA/FRONTEND BUILD DIR
 ####################################
 
-DATA_DIR = str(Path(os.getenv("DATA_DIR", "./data")).resolve())
-FRONTEND_BUILD_DIR = str(Path(os.getenv("FRONTEND_BUILD_DIR", "../build")))
+DATA_DIR = Path(os.getenv("DATA_DIR", BACKEND_DIR / "data")).resolve()
+FRONTEND_BUILD_DIR = Path(os.getenv("FRONTEND_BUILD_DIR", BASE_DIR / "build")).resolve()
+
+RESET_CONFIG_ON_START = (
+    os.environ.get("RESET_CONFIG_ON_START", "False").lower() == "true"
+)
+if RESET_CONFIG_ON_START:
+    try:
+        os.remove(f"{DATA_DIR}/config.json")
+        with open(f"{DATA_DIR}/config.json", "w") as f:
+            f.write("{}")
+    except Exception:
+        pass
 
 try:
-    with open(f"{DATA_DIR}/config.json", "r") as f:
-        CONFIG_DATA = json.load(f)
-except:
+    CONFIG_DATA = json.loads((DATA_DIR / "config.json").read_text())
+except Exception:
     CONFIG_DATA = {}
 
 
@@ -271,21 +309,205 @@ WEBUI_AUTH = os.environ.get("WEBUI_AUTH", "True").lower() == "true"
 WEBUI_AUTH_TRUSTED_EMAIL_HEADER = os.environ.get(
     "WEBUI_AUTH_TRUSTED_EMAIL_HEADER", None
 )
+WEBUI_AUTH_TRUSTED_NAME_HEADER = os.environ.get("WEBUI_AUTH_TRUSTED_NAME_HEADER", None)
 JWT_EXPIRES_IN = PersistentConfig(
     "JWT_EXPIRES_IN", "auth.jwt_expiry", os.environ.get("JWT_EXPIRES_IN", "-1")
 )
 
 ####################################
+# OAuth config
+####################################
+
+ENABLE_OAUTH_SIGNUP = PersistentConfig(
+    "ENABLE_OAUTH_SIGNUP",
+    "oauth.enable_signup",
+    os.environ.get("ENABLE_OAUTH_SIGNUP", "False").lower() == "true",
+)
+
+OAUTH_MERGE_ACCOUNTS_BY_EMAIL = PersistentConfig(
+    "OAUTH_MERGE_ACCOUNTS_BY_EMAIL",
+    "oauth.merge_accounts_by_email",
+    os.environ.get("OAUTH_MERGE_ACCOUNTS_BY_EMAIL", "False").lower() == "true",
+)
+
+OAUTH_PROVIDERS = {}
+
+GOOGLE_CLIENT_ID = PersistentConfig(
+    "GOOGLE_CLIENT_ID",
+    "oauth.google.client_id",
+    os.environ.get("GOOGLE_CLIENT_ID", ""),
+)
+
+GOOGLE_CLIENT_SECRET = PersistentConfig(
+    "GOOGLE_CLIENT_SECRET",
+    "oauth.google.client_secret",
+    os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+)
+
+GOOGLE_OAUTH_SCOPE = PersistentConfig(
+    "GOOGLE_OAUTH_SCOPE",
+    "oauth.google.scope",
+    os.environ.get("GOOGLE_OAUTH_SCOPE", "openid email profile"),
+)
+
+GOOGLE_REDIRECT_URI = PersistentConfig(
+    "GOOGLE_REDIRECT_URI",
+    "oauth.google.redirect_uri",
+    os.environ.get("GOOGLE_REDIRECT_URI", ""),
+)
+
+MICROSOFT_CLIENT_ID = PersistentConfig(
+    "MICROSOFT_CLIENT_ID",
+    "oauth.microsoft.client_id",
+    os.environ.get("MICROSOFT_CLIENT_ID", ""),
+)
+
+MICROSOFT_CLIENT_SECRET = PersistentConfig(
+    "MICROSOFT_CLIENT_SECRET",
+    "oauth.microsoft.client_secret",
+    os.environ.get("MICROSOFT_CLIENT_SECRET", ""),
+)
+
+MICROSOFT_CLIENT_TENANT_ID = PersistentConfig(
+    "MICROSOFT_CLIENT_TENANT_ID",
+    "oauth.microsoft.tenant_id",
+    os.environ.get("MICROSOFT_CLIENT_TENANT_ID", ""),
+)
+
+MICROSOFT_OAUTH_SCOPE = PersistentConfig(
+    "MICROSOFT_OAUTH_SCOPE",
+    "oauth.microsoft.scope",
+    os.environ.get("MICROSOFT_OAUTH_SCOPE", "openid email profile"),
+)
+
+MICROSOFT_REDIRECT_URI = PersistentConfig(
+    "MICROSOFT_REDIRECT_URI",
+    "oauth.microsoft.redirect_uri",
+    os.environ.get("MICROSOFT_REDIRECT_URI", ""),
+)
+
+OAUTH_CLIENT_ID = PersistentConfig(
+    "OAUTH_CLIENT_ID",
+    "oauth.oidc.client_id",
+    os.environ.get("OAUTH_CLIENT_ID", ""),
+)
+
+OAUTH_CLIENT_SECRET = PersistentConfig(
+    "OAUTH_CLIENT_SECRET",
+    "oauth.oidc.client_secret",
+    os.environ.get("OAUTH_CLIENT_SECRET", ""),
+)
+
+OPENID_PROVIDER_URL = PersistentConfig(
+    "OPENID_PROVIDER_URL",
+    "oauth.oidc.provider_url",
+    os.environ.get("OPENID_PROVIDER_URL", ""),
+)
+
+OPENID_REDIRECT_URI = PersistentConfig(
+    "OPENID_REDIRECT_URI",
+    "oauth.oidc.redirect_uri",
+    os.environ.get("OPENID_REDIRECT_URI", ""),
+)
+
+OAUTH_SCOPES = PersistentConfig(
+    "OAUTH_SCOPES",
+    "oauth.oidc.scopes",
+    os.environ.get("OAUTH_SCOPES", "openid email profile"),
+)
+
+OAUTH_PROVIDER_NAME = PersistentConfig(
+    "OAUTH_PROVIDER_NAME",
+    "oauth.oidc.provider_name",
+    os.environ.get("OAUTH_PROVIDER_NAME", "SSO"),
+)
+
+OAUTH_USERNAME_CLAIM = PersistentConfig(
+    "OAUTH_USERNAME_CLAIM",
+    "oauth.oidc.username_claim",
+    os.environ.get("OAUTH_USERNAME_CLAIM", "name"),
+)
+
+OAUTH_PICTURE_CLAIM = PersistentConfig(
+    "OAUTH_USERNAME_CLAIM",
+    "oauth.oidc.avatar_claim",
+    os.environ.get("OAUTH_PICTURE_CLAIM", "picture"),
+)
+
+OAUTH_EMAIL_CLAIM = PersistentConfig(
+    "OAUTH_EMAIL_CLAIM",
+    "oauth.oidc.email_claim",
+    os.environ.get("OAUTH_EMAIL_CLAIM", "email"),
+)
+
+
+def load_oauth_providers():
+    OAUTH_PROVIDERS.clear()
+    if GOOGLE_CLIENT_ID.value and GOOGLE_CLIENT_SECRET.value:
+        OAUTH_PROVIDERS["google"] = {
+            "client_id": GOOGLE_CLIENT_ID.value,
+            "client_secret": GOOGLE_CLIENT_SECRET.value,
+            "server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+            "scope": GOOGLE_OAUTH_SCOPE.value,
+            "redirect_uri": GOOGLE_REDIRECT_URI.value,
+        }
+
+    if (
+        MICROSOFT_CLIENT_ID.value
+        and MICROSOFT_CLIENT_SECRET.value
+        and MICROSOFT_CLIENT_TENANT_ID.value
+    ):
+        OAUTH_PROVIDERS["microsoft"] = {
+            "client_id": MICROSOFT_CLIENT_ID.value,
+            "client_secret": MICROSOFT_CLIENT_SECRET.value,
+            "server_metadata_url": f"https://login.microsoftonline.com/{MICROSOFT_CLIENT_TENANT_ID.value}/v2.0/.well-known/openid-configuration",
+            "scope": MICROSOFT_OAUTH_SCOPE.value,
+            "redirect_uri": MICROSOFT_REDIRECT_URI.value,
+        }
+
+    if (
+        OAUTH_CLIENT_ID.value
+        and OAUTH_CLIENT_SECRET.value
+        and OPENID_PROVIDER_URL.value
+    ):
+        OAUTH_PROVIDERS["oidc"] = {
+            "client_id": OAUTH_CLIENT_ID.value,
+            "client_secret": OAUTH_CLIENT_SECRET.value,
+            "server_metadata_url": OPENID_PROVIDER_URL.value,
+            "scope": OAUTH_SCOPES.value,
+            "name": OAUTH_PROVIDER_NAME.value,
+            "redirect_uri": OPENID_REDIRECT_URI.value,
+        }
+
+
+load_oauth_providers()
+
+####################################
 # Static DIR
 ####################################
 
-STATIC_DIR = str(Path(os.getenv("STATIC_DIR", "./static")).resolve())
+STATIC_DIR = Path(os.getenv("STATIC_DIR", BACKEND_DIR / "static")).resolve()
 
-frontend_favicon = f"{FRONTEND_BUILD_DIR}/favicon.png"
-if os.path.exists(frontend_favicon):
-    shutil.copyfile(frontend_favicon, f"{STATIC_DIR}/favicon.png")
+frontend_favicon = FRONTEND_BUILD_DIR / "static" / "favicon.png"
+
+if frontend_favicon.exists():
+    try:
+        shutil.copyfile(frontend_favicon, STATIC_DIR / "favicon.png")
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
 else:
     logging.warning(f"Frontend favicon not found at {frontend_favicon}")
+
+frontend_splash = FRONTEND_BUILD_DIR / "static" / "splash.png"
+
+if frontend_splash.exists():
+    try:
+        shutil.copyfile(frontend_splash, STATIC_DIR / "splash.png")
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+else:
+    logging.warning(f"Frontend splash not found at {frontend_splash}")
+
 
 ####################################
 # CUSTOM_NAME
@@ -308,6 +530,19 @@ if CUSTOM_NAME:
                 r = requests.get(url, stream=True)
                 if r.status_code == 200:
                     with open(f"{STATIC_DIR}/favicon.png", "wb") as f:
+                        r.raw.decode_content = True
+                        shutil.copyfileobj(r.raw, f)
+
+            if "splash" in data:
+                url = (
+                    f"https://api.openwebui.com{data['splash']}"
+                    if data["splash"][0] == "/"
+                    else data["splash"]
+                )
+
+                r = requests.get(url, stream=True)
+                if r.status_code == 200:
+                    with open(f"{STATIC_DIR}/splash.png", "wb") as f:
                         r.raw.decode_content = True
                         shutil.copyfileobj(r.raw, f)
 
@@ -342,6 +577,22 @@ Path(DOCS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 ####################################
+# Tools DIR
+####################################
+
+TOOLS_DIR = os.getenv("TOOLS_DIR", f"{DATA_DIR}/tools")
+Path(TOOLS_DIR).mkdir(parents=True, exist_ok=True)
+
+
+####################################
+# Functions DIR
+####################################
+
+FUNCTIONS_DIR = os.getenv("FUNCTIONS_DIR", f"{DATA_DIR}/functions")
+Path(FUNCTIONS_DIR).mkdir(parents=True, exist_ok=True)
+
+
+####################################
 # LITELLM_CONFIG
 ####################################
 
@@ -368,21 +619,39 @@ def create_config_file(file_path):
 
 LITELLM_CONFIG_PATH = f"{DATA_DIR}/litellm/config.yaml"
 
-if not os.path.exists(LITELLM_CONFIG_PATH):
-    log.info("Config file doesn't exist. Creating...")
-    create_config_file(LITELLM_CONFIG_PATH)
-    log.info("Config file created successfully.")
+# if not os.path.exists(LITELLM_CONFIG_PATH):
+#     log.info("Config file doesn't exist. Creating...")
+#     create_config_file(LITELLM_CONFIG_PATH)
+#     log.info("Config file created successfully.")
 
 
 ####################################
 # OLLAMA_BASE_URL
 ####################################
 
+
+ENABLE_OLLAMA_API = PersistentConfig(
+    "ENABLE_OLLAMA_API",
+    "ollama.enable",
+    os.environ.get("ENABLE_OLLAMA_API", "True").lower() == "true",
+)
+
 OLLAMA_API_BASE_URL = os.environ.get(
     "OLLAMA_API_BASE_URL", "http://localhost:11434/api"
 )
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "")
+AIOHTTP_CLIENT_TIMEOUT = os.environ.get("AIOHTTP_CLIENT_TIMEOUT", "")
+
+if AIOHTTP_CLIENT_TIMEOUT == "":
+    AIOHTTP_CLIENT_TIMEOUT = None
+else:
+    try:
+        AIOHTTP_CLIENT_TIMEOUT = int(AIOHTTP_CLIENT_TIMEOUT)
+    except Exception:
+        AIOHTTP_CLIENT_TIMEOUT = 300
+
+
 K8S_FLAG = os.environ.get("K8S_FLAG", "")
 USE_OLLAMA_DOCKER = os.environ.get("USE_OLLAMA_DOCKER", "false")
 
@@ -459,7 +728,7 @@ try:
     OPENAI_API_KEY = OPENAI_API_KEYS.value[
         OPENAI_API_BASE_URLS.value.index("https://api.openai.com/v1")
     ]
-except:
+except Exception:
     pass
 
 OPENAI_API_BASE_URL = "https://api.openai.com/v1"
@@ -477,6 +746,19 @@ ENABLE_SIGNUP = PersistentConfig(
         else os.environ.get("ENABLE_SIGNUP", "True").lower() == "true"
     ),
 )
+
+ENABLE_LOGIN_FORM = PersistentConfig(
+    "ENABLE_LOGIN_FORM",
+    "ui.ENABLE_LOGIN_FORM",
+    os.environ.get("ENABLE_LOGIN_FORM", "True").lower() == "true",
+)
+
+DEFAULT_LOCALE = PersistentConfig(
+    "DEFAULT_LOCALE",
+    "ui.default_locale",
+    os.environ.get("DEFAULT_LOCALE", ""),
+)
+
 DEFAULT_MODELS = PersistentConfig(
     "DEFAULT_MODELS", "ui.default_models", os.environ.get("DEFAULT_MODELS", None)
 )
@@ -525,10 +807,24 @@ USER_PERMISSIONS_CHAT_DELETION = (
     os.environ.get("USER_PERMISSIONS_CHAT_DELETION", "True").lower() == "true"
 )
 
+USER_PERMISSIONS_CHAT_EDITING = (
+    os.environ.get("USER_PERMISSIONS_CHAT_EDITING", "True").lower() == "true"
+)
+
+USER_PERMISSIONS_CHAT_TEMPORARY = (
+    os.environ.get("USER_PERMISSIONS_CHAT_TEMPORARY", "True").lower() == "true"
+)
+
 USER_PERMISSIONS = PersistentConfig(
     "USER_PERMISSIONS",
     "ui.user_permissions",
-    {"chat": {"deletion": USER_PERMISSIONS_CHAT_DELETION}},
+    {
+        "chat": {
+            "deletion": USER_PERMISSIONS_CHAT_DELETION,
+            "editing": USER_PERMISSIONS_CHAT_EDITING,
+            "temporary": USER_PERMISSIONS_CHAT_TEMPORARY,
+        }
+    },
 )
 
 ENABLE_MODEL_FILTER = PersistentConfig(
@@ -549,6 +845,160 @@ WEBHOOK_URL = PersistentConfig(
 
 ENABLE_ADMIN_EXPORT = os.environ.get("ENABLE_ADMIN_EXPORT", "True").lower() == "true"
 
+ENABLE_ADMIN_CHAT_ACCESS = (
+    os.environ.get("ENABLE_ADMIN_CHAT_ACCESS", "True").lower() == "true"
+)
+
+ENABLE_COMMUNITY_SHARING = PersistentConfig(
+    "ENABLE_COMMUNITY_SHARING",
+    "ui.enable_community_sharing",
+    os.environ.get("ENABLE_COMMUNITY_SHARING", "True").lower() == "true",
+)
+
+ENABLE_MESSAGE_RATING = PersistentConfig(
+    "ENABLE_MESSAGE_RATING",
+    "ui.enable_message_rating",
+    os.environ.get("ENABLE_MESSAGE_RATING", "True").lower() == "true",
+)
+
+
+def validate_cors_origins(origins):
+    for origin in origins:
+        if origin != "*":
+            validate_cors_origin(origin)
+
+
+def validate_cors_origin(origin):
+    parsed_url = urlparse(origin)
+
+    # Check if the scheme is either http or https
+    if parsed_url.scheme not in ["http", "https"]:
+        raise ValueError(
+            f"Invalid scheme in CORS_ALLOW_ORIGIN: '{origin}'. Only 'http' and 'https' are allowed."
+        )
+
+    # Ensure that the netloc (domain + port) is present, indicating it's a valid URL
+    if not parsed_url.netloc:
+        raise ValueError(f"Invalid URL structure in CORS_ALLOW_ORIGIN: '{origin}'.")
+
+
+# For production, you should only need one host as
+# fastapi serves the svelte-kit built frontend and backend from the same host and port.
+# To test CORS_ALLOW_ORIGIN locally, you can set something like
+# CORS_ALLOW_ORIGIN=http://localhost:5173;http://localhost:8080
+# in your .env file depending on your frontend port, 5173 in this case.
+CORS_ALLOW_ORIGIN = os.environ.get("CORS_ALLOW_ORIGIN", "*").split(";")
+
+if "*" in CORS_ALLOW_ORIGIN:
+    log.warning(
+        "\n\nWARNING: CORS_ALLOW_ORIGIN IS SET TO '*' - NOT RECOMMENDED FOR PRODUCTION DEPLOYMENTS.\n"
+    )
+
+validate_cors_origins(CORS_ALLOW_ORIGIN)
+
+
+class BannerModel(BaseModel):
+    id: str
+    type: str
+    title: Optional[str] = None
+    content: str
+    dismissible: bool
+    timestamp: int
+
+
+try:
+    banners = json.loads(os.environ.get("WEBUI_BANNERS", "[]"))
+    banners = [BannerModel(**banner) for banner in banners]
+except Exception as e:
+    print(f"Error loading WEBUI_BANNERS: {e}")
+    banners = []
+
+WEBUI_BANNERS = PersistentConfig("WEBUI_BANNERS", "ui.banners", banners)
+
+
+SHOW_ADMIN_DETAILS = PersistentConfig(
+    "SHOW_ADMIN_DETAILS",
+    "auth.admin.show",
+    os.environ.get("SHOW_ADMIN_DETAILS", "true").lower() == "true",
+)
+
+ADMIN_EMAIL = PersistentConfig(
+    "ADMIN_EMAIL",
+    "auth.admin.email",
+    os.environ.get("ADMIN_EMAIL", None),
+)
+
+
+####################################
+# TASKS
+####################################
+
+
+TASK_MODEL = PersistentConfig(
+    "TASK_MODEL",
+    "task.model.default",
+    os.environ.get("TASK_MODEL", ""),
+)
+
+TASK_MODEL_EXTERNAL = PersistentConfig(
+    "TASK_MODEL_EXTERNAL",
+    "task.model.external",
+    os.environ.get("TASK_MODEL_EXTERNAL", ""),
+)
+
+TITLE_GENERATION_PROMPT_TEMPLATE = PersistentConfig(
+    "TITLE_GENERATION_PROMPT_TEMPLATE",
+    "task.title.prompt_template",
+    os.environ.get(
+        "TITLE_GENERATION_PROMPT_TEMPLATE",
+        """Create a concise, 3-5 word title with an emoji as a title for the prompt in the given language. Suitable Emojis for the summary can be used to enhance understanding but avoid quotation marks or special formatting. RESPOND ONLY WITH THE TITLE TEXT.
+
+Examples of titles:
+📉 Stock Market Trends
+🍪 Perfect Chocolate Chip Recipe
+Evolution of Music Streaming
+Remote Work Productivity Tips
+Artificial Intelligence in Healthcare
+🎮 Video Game Development Insights
+
+Prompt: {{prompt:middletruncate:8000}}""",
+    ),
+)
+
+
+SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE = PersistentConfig(
+    "SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE",
+    "task.search.prompt_template",
+    os.environ.get(
+        "SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE",
+        """You are tasked with generating web search queries. Give me an appropriate query to answer my question for google search. Answer with only the query. Today is {{CURRENT_DATE}}.
+        
+Question:
+{{prompt:end:4000}}""",
+    ),
+)
+
+SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD = PersistentConfig(
+    "SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD",
+    "task.search.prompt_length_threshold",
+    int(
+        os.environ.get(
+            "SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD",
+            100,
+        )
+    ),
+)
+
+TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = PersistentConfig(
+    "TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE",
+    "task.tools.prompt_template",
+    os.environ.get(
+        "TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE",
+        """Available Tools: {{TOOLS}}\nReturn an empty string if no tools match the query. If a function tool matches, construct and return a JSON object in the format {\"name\": \"functionName\", \"parameters\": {\"requiredFunctionParamKey\": \"requiredFunctionParamValue\"}} using the appropriate tool and its parameters. Only return the object and limit the response to the JSON object without additional text.""",
+    ),
+)
+
+
 ####################################
 # WEBUI_SECRET_KEY
 ####################################
@@ -560,8 +1010,34 @@ WEBUI_SECRET_KEY = os.environ.get(
     ),  # DEPRECATED: remove at next major version
 )
 
+WEBUI_SESSION_COOKIE_SAME_SITE = os.environ.get(
+    "WEBUI_SESSION_COOKIE_SAME_SITE",
+    os.environ.get("WEBUI_SESSION_COOKIE_SAME_SITE", "lax"),
+)
+
+WEBUI_SESSION_COOKIE_SECURE = os.environ.get(
+    "WEBUI_SESSION_COOKIE_SECURE",
+    os.environ.get("WEBUI_SESSION_COOKIE_SECURE", "false").lower() == "true",
+)
+
 if WEBUI_AUTH and WEBUI_SECRET_KEY == "":
     raise ValueError(ERROR_MESSAGES.ENV_VAR_NOT_FOUND)
+
+####################################
+# RAG document content extraction
+####################################
+
+CONTENT_EXTRACTION_ENGINE = PersistentConfig(
+    "CONTENT_EXTRACTION_ENGINE",
+    "rag.CONTENT_EXTRACTION_ENGINE",
+    os.environ.get("CONTENT_EXTRACTION_ENGINE", "").lower(),
+)
+
+TIKA_SERVER_URL = PersistentConfig(
+    "TIKA_SERVER_URL",
+    "rag.tika_server_url",
+    os.getenv("TIKA_SERVER_URL", "http://tika:9998"),  # Default for sidecar deployment
+)
 
 ####################################
 # RAG
@@ -621,7 +1097,7 @@ RAG_EMBEDDING_MODEL = PersistentConfig(
     "rag.embedding_model",
     os.environ.get("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
 )
-log.info(f"Embedding model set: {RAG_EMBEDDING_MODEL.value}"),
+log.info(f"Embedding model set: {RAG_EMBEDDING_MODEL.value}")
 
 RAG_EMBEDDING_MODEL_AUTO_UPDATE = (
     os.environ.get("RAG_EMBEDDING_MODEL_AUTO_UPDATE", "").lower() == "true"
@@ -631,13 +1107,19 @@ RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE = (
     os.environ.get("RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE", "").lower() == "true"
 )
 
+RAG_EMBEDDING_OPENAI_BATCH_SIZE = PersistentConfig(
+    "RAG_EMBEDDING_OPENAI_BATCH_SIZE",
+    "rag.embedding_openai_batch_size",
+    int(os.environ.get("RAG_EMBEDDING_OPENAI_BATCH_SIZE", "1")),
+)
+
 RAG_RERANKING_MODEL = PersistentConfig(
     "RAG_RERANKING_MODEL",
     "rag.reranking_model",
     os.environ.get("RAG_RERANKING_MODEL", ""),
 )
 if RAG_RERANKING_MODEL.value != "":
-    log.info(f"Reranking model set: {RAG_RERANKING_MODEL.value}"),
+    log.info(f"Reranking model set: {RAG_RERANKING_MODEL.value}")
 
 RAG_RERANKING_MODEL_AUTO_UPDATE = (
     os.environ.get("RAG_RERANKING_MODEL_AUTO_UPDATE", "").lower() == "true"
@@ -725,6 +1207,98 @@ YOUTUBE_LOADER_LANGUAGE = PersistentConfig(
     os.getenv("YOUTUBE_LOADER_LANGUAGE", "en").split(","),
 )
 
+
+ENABLE_RAG_WEB_SEARCH = PersistentConfig(
+    "ENABLE_RAG_WEB_SEARCH",
+    "rag.web.search.enable",
+    os.getenv("ENABLE_RAG_WEB_SEARCH", "False").lower() == "true",
+)
+
+RAG_WEB_SEARCH_ENGINE = PersistentConfig(
+    "RAG_WEB_SEARCH_ENGINE",
+    "rag.web.search.engine",
+    os.getenv("RAG_WEB_SEARCH_ENGINE", ""),
+)
+
+# You can provide a list of your own websites to filter after performing a web search.
+# This ensures the highest level of safety and reliability of the information sources.
+RAG_WEB_SEARCH_DOMAIN_FILTER_LIST = PersistentConfig(
+    "RAG_WEB_SEARCH_DOMAIN_FILTER_LIST",
+    "rag.rag.web.search.domain.filter_list",
+    [
+        # "wikipedia.com",
+        # "wikimedia.org",
+        # "wikidata.org",
+    ],
+)
+
+SEARXNG_QUERY_URL = PersistentConfig(
+    "SEARXNG_QUERY_URL",
+    "rag.web.search.searxng_query_url",
+    os.getenv("SEARXNG_QUERY_URL", ""),
+)
+
+GOOGLE_PSE_API_KEY = PersistentConfig(
+    "GOOGLE_PSE_API_KEY",
+    "rag.web.search.google_pse_api_key",
+    os.getenv("GOOGLE_PSE_API_KEY", ""),
+)
+
+GOOGLE_PSE_ENGINE_ID = PersistentConfig(
+    "GOOGLE_PSE_ENGINE_ID",
+    "rag.web.search.google_pse_engine_id",
+    os.getenv("GOOGLE_PSE_ENGINE_ID", ""),
+)
+
+BRAVE_SEARCH_API_KEY = PersistentConfig(
+    "BRAVE_SEARCH_API_KEY",
+    "rag.web.search.brave_search_api_key",
+    os.getenv("BRAVE_SEARCH_API_KEY", ""),
+)
+
+SERPSTACK_API_KEY = PersistentConfig(
+    "SERPSTACK_API_KEY",
+    "rag.web.search.serpstack_api_key",
+    os.getenv("SERPSTACK_API_KEY", ""),
+)
+
+SERPSTACK_HTTPS = PersistentConfig(
+    "SERPSTACK_HTTPS",
+    "rag.web.search.serpstack_https",
+    os.getenv("SERPSTACK_HTTPS", "True").lower() == "true",
+)
+
+SERPER_API_KEY = PersistentConfig(
+    "SERPER_API_KEY",
+    "rag.web.search.serper_api_key",
+    os.getenv("SERPER_API_KEY", ""),
+)
+
+SERPLY_API_KEY = PersistentConfig(
+    "SERPLY_API_KEY",
+    "rag.web.search.serply_api_key",
+    os.getenv("SERPLY_API_KEY", ""),
+)
+
+TAVILY_API_KEY = PersistentConfig(
+    "TAVILY_API_KEY",
+    "rag.web.search.tavily_api_key",
+    os.getenv("TAVILY_API_KEY", ""),
+)
+
+RAG_WEB_SEARCH_RESULT_COUNT = PersistentConfig(
+    "RAG_WEB_SEARCH_RESULT_COUNT",
+    "rag.web.search.result_count",
+    int(os.getenv("RAG_WEB_SEARCH_RESULT_COUNT", "3")),
+)
+
+RAG_WEB_SEARCH_CONCURRENT_REQUESTS = PersistentConfig(
+    "RAG_WEB_SEARCH_CONCURRENT_REQUESTS",
+    "rag.web.search.concurrent_requests",
+    int(os.getenv("RAG_WEB_SEARCH_CONCURRENT_REQUESTS", "10")),
+)
+
+
 ####################################
 # Transcribe
 ####################################
@@ -743,7 +1317,7 @@ WHISPER_MODEL_AUTO_UPDATE = (
 IMAGE_GENERATION_ENGINE = PersistentConfig(
     "IMAGE_GENERATION_ENGINE",
     "image_generation.engine",
-    os.getenv("IMAGE_GENERATION_ENGINE", ""),
+    os.getenv("IMAGE_GENERATION_ENGINE", "openai"),
 )
 
 ENABLE_IMAGE_GENERATION = PersistentConfig(
@@ -756,11 +1330,139 @@ AUTOMATIC1111_BASE_URL = PersistentConfig(
     "image_generation.automatic1111.base_url",
     os.getenv("AUTOMATIC1111_BASE_URL", ""),
 )
+AUTOMATIC1111_API_AUTH = PersistentConfig(
+    "AUTOMATIC1111_API_AUTH",
+    "image_generation.automatic1111.api_auth",
+    os.getenv("AUTOMATIC1111_API_AUTH", ""),
+)
 
 COMFYUI_BASE_URL = PersistentConfig(
     "COMFYUI_BASE_URL",
     "image_generation.comfyui.base_url",
     os.getenv("COMFYUI_BASE_URL", ""),
+)
+
+COMFYUI_DEFAULT_WORKFLOW = """
+{
+  "3": {
+    "inputs": {
+      "seed": 0,
+      "steps": 20,
+      "cfg": 8,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": [
+        "4",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "4": {
+    "inputs": {
+      "ckpt_name": "model.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "5": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "Prompt",
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "4",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "9": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}
+"""
+
+
+COMFYUI_WORKFLOW = PersistentConfig(
+    "COMFYUI_WORKFLOW",
+    "image_generation.comfyui.workflow",
+    os.getenv("COMFYUI_WORKFLOW", COMFYUI_DEFAULT_WORKFLOW),
+)
+
+COMFYUI_WORKFLOW_NODES = PersistentConfig(
+    "COMFYUI_WORKFLOW",
+    "image_generation.comfyui.nodes",
+    [],
 )
 
 IMAGES_OPENAI_API_BASE_URL = PersistentConfig(
@@ -792,38 +1494,65 @@ IMAGE_GENERATION_MODEL = PersistentConfig(
 # Audio
 ####################################
 
-AUDIO_OPENAI_API_BASE_URL = PersistentConfig(
-    "AUDIO_OPENAI_API_BASE_URL",
-    "audio.openai.api_base_url",
-    os.getenv("AUDIO_OPENAI_API_BASE_URL", OPENAI_API_BASE_URL),
-)
-AUDIO_OPENAI_API_KEY = PersistentConfig(
-    "AUDIO_OPENAI_API_KEY",
-    "audio.openai.api_key",
-    os.getenv("AUDIO_OPENAI_API_KEY", OPENAI_API_KEY),
-)
-AUDIO_OPENAI_API_MODEL = PersistentConfig(
-    "AUDIO_OPENAI_API_MODEL",
-    "audio.openai.api_model",
-    os.getenv("AUDIO_OPENAI_API_MODEL", "tts-1"),
-)
-AUDIO_OPENAI_API_VOICE = PersistentConfig(
-    "AUDIO_OPENAI_API_VOICE",
-    "audio.openai.api_voice",
-    os.getenv("AUDIO_OPENAI_API_VOICE", "alloy"),
+AUDIO_STT_OPENAI_API_BASE_URL = PersistentConfig(
+    "AUDIO_STT_OPENAI_API_BASE_URL",
+    "audio.stt.openai.api_base_url",
+    os.getenv("AUDIO_STT_OPENAI_API_BASE_URL", OPENAI_API_BASE_URL),
 )
 
-####################################
-# LiteLLM
-####################################
+AUDIO_STT_OPENAI_API_KEY = PersistentConfig(
+    "AUDIO_STT_OPENAI_API_KEY",
+    "audio.stt.openai.api_key",
+    os.getenv("AUDIO_STT_OPENAI_API_KEY", OPENAI_API_KEY),
+)
+
+AUDIO_STT_ENGINE = PersistentConfig(
+    "AUDIO_STT_ENGINE",
+    "audio.stt.engine",
+    os.getenv("AUDIO_STT_ENGINE", ""),
+)
+
+AUDIO_STT_MODEL = PersistentConfig(
+    "AUDIO_STT_MODEL",
+    "audio.stt.model",
+    os.getenv("AUDIO_STT_MODEL", "whisper-1"),
+)
+
+AUDIO_TTS_OPENAI_API_BASE_URL = PersistentConfig(
+    "AUDIO_TTS_OPENAI_API_BASE_URL",
+    "audio.tts.openai.api_base_url",
+    os.getenv("AUDIO_TTS_OPENAI_API_BASE_URL", OPENAI_API_BASE_URL),
+)
+AUDIO_TTS_OPENAI_API_KEY = PersistentConfig(
+    "AUDIO_TTS_OPENAI_API_KEY",
+    "audio.tts.openai.api_key",
+    os.getenv("AUDIO_TTS_OPENAI_API_KEY", OPENAI_API_KEY),
+)
+
+AUDIO_TTS_API_KEY = PersistentConfig(
+    "AUDIO_TTS_API_KEY",
+    "audio.tts.api_key",
+    os.getenv("AUDIO_TTS_API_KEY", ""),
+)
+
+AUDIO_TTS_ENGINE = PersistentConfig(
+    "AUDIO_TTS_ENGINE",
+    "audio.tts.engine",
+    os.getenv("AUDIO_TTS_ENGINE", ""),
+)
 
 
-ENABLE_LITELLM = os.environ.get("ENABLE_LITELLM", "True").lower() == "true"
+AUDIO_TTS_MODEL = PersistentConfig(
+    "AUDIO_TTS_MODEL",
+    "audio.tts.model",
+    os.getenv("AUDIO_TTS_MODEL", "tts-1"),  # OpenAI default model
+)
 
-LITELLM_PROXY_PORT = int(os.getenv("LITELLM_PROXY_PORT", "14365"))
-if LITELLM_PROXY_PORT < 0 or LITELLM_PROXY_PORT > 65535:
-    raise ValueError("Invalid port number for LITELLM_PROXY_PORT")
-LITELLM_PROXY_HOST = os.getenv("LITELLM_PROXY_HOST", "127.0.0.1")
+AUDIO_TTS_VOICE = PersistentConfig(
+    "AUDIO_TTS_VOICE",
+    "audio.tts.voice",
+    os.getenv("AUDIO_TTS_VOICE", "alloy"),  # OpenAI default voice
+)
 
 
 ####################################
@@ -831,3 +1560,7 @@ LITELLM_PROXY_HOST = os.getenv("LITELLM_PROXY_HOST", "127.0.0.1")
 ####################################
 
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DATA_DIR}/webui.db")
+
+# Replace the postgres:// with postgresql://
+if "postgres://" in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")

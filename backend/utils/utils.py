@@ -1,14 +1,12 @@
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi import HTTPException, status, Depends
+from fastapi import HTTPException, status, Depends, Request
 
-from apps.web.models.users import Users
+from apps.webui.models.users import Users
 
-from pydantic import BaseModel
 from typing import Union, Optional
 from constants import ERROR_MESSAGES
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
-import requests
 import jwt
 import uuid
 import logging
@@ -24,7 +22,7 @@ ALGORITHM = "HS256"
 # Auth Utils
 ##############
 
-bearer_security = HTTPBearer()
+bearer_security = HTTPBearer(auto_error=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
@@ -53,7 +51,7 @@ def decode_token(token: str) -> Optional[dict]:
     try:
         decoded = jwt.decode(token, SESSION_SECRET, algorithms=[ALGORITHM])
         return decoded
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -70,19 +68,32 @@ def get_http_authorization_cred(auth_header: str):
     try:
         scheme, credentials = auth_header.split(" ")
         return HTTPAuthorizationCredentials(scheme=scheme, credentials=credentials)
-    except:
+    except Exception:
         raise ValueError(ERROR_MESSAGES.INVALID_TOKEN)
 
 
 def get_current_user(
+    request: Request,
     auth_token: HTTPAuthorizationCredentials = Depends(bearer_security),
 ):
+    token = None
+
+    if auth_token is not None:
+        token = auth_token.credentials
+
+    if token is None and "token" in request.cookies:
+        token = request.cookies.get("token")
+
+    if token is None:
+        raise HTTPException(status_code=403, detail="Not authenticated")
+
     # auth by api key
-    if auth_token.credentials.startswith("sk-"):
-        return get_current_user_by_api_key(auth_token.credentials)
+    if token.startswith("sk-"):
+        return get_current_user_by_api_key(token)
+
     # auth by jwt token
-    data = decode_token(auth_token.credentials)
-    if data != None and "id" in data:
+    data = decode_token(token)
+    if data is not None and "id" in data:
         user = Users.get_user_by_id(data["id"])
         if user is None:
             raise HTTPException(
